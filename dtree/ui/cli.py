@@ -9,7 +9,7 @@ from textual.message import Message
 
 # External modules you already have
 from ui.tab import TabInput, SuggestionsView, PREVIEW_PLACEHOLDER, format_preview_text
-from commands import CommandSet, CommandEntry  # assuming these types exist in your project
+from commands import CommandEntry  # assuming these types exist in your project
 
 
 class Output(Message):
@@ -61,7 +61,9 @@ class CLI(Widget):
             return
 
         # Echo the entered command to the output pane
-        self._append_output("#output_content", f"> {user_input}\n")
+        resolved_preview = self.app.commands.preview_full_command(user_input)
+        preview_text = resolved_preview or user_input
+        self._append_output("#output_content", f"> {preview_text}\n")
 
         # Resolve command + args via your command catalog hanging off the App
         cmd, arg_tokens = self.app.commands.resolve(user_input)

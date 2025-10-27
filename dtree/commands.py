@@ -1,8 +1,8 @@
 import argparse 
 import rich_argparse
 from typing import Dict, Union, Callable, Iterable, Optional
-from dataclasses import dataclass
 import inspect
+import shlex
 
 class BabysFirstFormatter(rich_argparse.RichHelpFormatter):
     def __init__(self, *args, **kwargs):
@@ -10,28 +10,6 @@ class BabysFirstFormatter(rich_argparse.RichHelpFormatter):
         
     def add_usage(self, usage, actions, groups, prefix=""):
         return super().add_usage(usage, actions, groups, prefix)    
-
-    def _format_action_invocation(self, action):
-        # Defer to RichHelpFormatter for positionals and flags that do not take values.
-        if not action.option_strings or action.nargs == 0:
-            return super()._format_action_invocation(action)
-
-        default = action.default
-        if default is None or default is argparse.SUPPRESS:
-            return super()._format_action_invocation(action)
-
-        option = next((opt for opt in action.option_strings if opt.startswith("--")), action.option_strings[0])
-        return f"{option} {self._stringify_default(default)}"
-
-    def _stringify_default(self, value) -> str:
-        if isinstance(value, (list, tuple)):
-            return ",".join(str(item) for item in value)
-        return str(value)
-
-@dataclass
-class CommandSet:
-    description: str
-    children: Dict[str, Union["CommandSet", "CommandEntry"]]
 
 class CommandEntry:
     def __init__(self, runnable, name: str, description: str):
@@ -50,59 +28,71 @@ class CommandEntry:
             formatter_class=BabysFirstFormatter
         )
 
+    def convert_args(self, arg_tokens: list[str]) -> list[str]:
+        if not arg_tokens:
+            return []
+
+        if self.parser is None:
+            return arg_tokens
+
+        converter = getattr(self.parser, "convert_arg_line_to_args", None)
+        if not callable(converter):
+            return arg_tokens
+
+        line = " ".join(arg_tokens)
+        if not line:
+            return []
+
+        converted = converter(line)
+        if converted is None:
+            return []
+
+        if isinstance(converted, str):
+            converted = [converted]
+
+        tokens: list[str] = []
+        for item in converted:
+            if isinstance(item, str):
+                split_items = shlex.split(item)
+                if not split_items:
+                    continue
+                tokens.extend(split_items)
+            else:
+                tokens.append(str(item))
+
+        return tokens or arg_tokens
+
     def set_dynamic_templates(self, templates: Iterable[argparse.Namespace]) -> None:
         """Attach ready-to-use argparse.Namespace templates for completions."""
         self.dynamic_templates = list(templates)
         self._usage_cache = None
 
     def usage_summary(self) -> str:
-        if self.parser is None:
-            return self.description
-
-        self._ensure_default_metavars()
-
         if self._usage_cache is not None:
             return self._usage_cache
 
-        base_variant = self._base_usage_variant()
-        variants = []
-        seen = set()
+        default_values = self._collect_default_values()
+        variants: list[str] = []
+        seen: set[str] = set()
 
+        base_variant = self._format_usage_variant(default_values, default_values)
         if base_variant:
             variants.append(base_variant)
             seen.add(base_variant)
 
         for template in self.dynamic_templates:
             values = {key: getattr(template, key) for key in vars(template)}
-            variant = self._format_usage_variant(values)
+            variant = self._format_usage_variant(values, default_values)
             if variant and variant not in seen:
                 variants.append(variant)
                 seen.add(variant)
 
         if not variants:
-            variants = [self.description]
+            variants = [self.name]
 
         summary = " | ".join(variants)
         self._usage_cache = summary
         return summary
-
-    def _ensure_default_metavars(self) -> None:
-        if self.parser is None:
-            return
-
-        for action in self.parser._actions:
-            if not action.option_strings or action.nargs == 0:
-                continue
-            default = action.default
-            if default is None or default is argparse.SUPPRESS:
-                continue
-
-            marker = getattr(action, "_default_metavar", object())
-            if marker == default:
-                continue
-
-            action.metavar = self._stringify_default(default)
-            setattr(action, "_default_metavar", default)
 
     @staticmethod
     def _stringify_default(value) -> str:
@@ -122,29 +112,11 @@ class CommandEntry:
             return f"[{value_str}]"
         return value_str
 
-    def _base_usage_variant(self) -> str:
+    def _format_usage_variant(self, values: dict[str, object], default_values: dict[str, object]) -> str:
         if self.parser is None:
-            return ""
+            return self.name
 
-        usage = self.parser.format_usage().strip()
-        prefix = f"usage: {self.parser.prog}"
-
-        if usage.lower().startswith(prefix):
-            summary = usage[len(prefix):].strip()
-        else:
-            summary = usage.strip()
-
-        prog = self.parser.prog
-        if summary.startswith(prog):
-            summary = summary[len(prog):].strip()
-
-        return summary or ""
-
-    def _format_usage_variant(self, values: dict[str, object]) -> str:
-        if self.parser is None:
-            return ""
-
-        parts = []
+        parts = [self.name]
         for action in self.parser._actions:
             if not action.option_strings or action.nargs == 0:
                 continue
@@ -155,8 +127,27 @@ class CommandEntry:
             if value is None or value is argparse.SUPPRESS:
                 continue
             option = next((opt for opt in action.option_strings if opt.startswith("--")), action.option_strings[0])
-            parts.append(f"[{option} {self._stringify_default(value)}]")
+            value_text = self._stringify_default(value)
+            is_default = dest in default_values and default_values[dest] == value
+            if is_default:
+                parts.append(f"[{option} {value_text}]")
+            else:
+                parts.append(f"{option} {value_text}")
         return " ".join(parts)
+
+    def _collect_default_values(self) -> dict[str, object]:
+        defaults: dict[str, object] = {}
+        if self.parser is None:
+            return defaults
+        for action in self.parser._actions:
+            if not action.option_strings or action.nargs == 0:
+                continue
+            default = action.default
+            if default is None or default is argparse.SUPPRESS:
+                continue
+            defaults[action.dest] = default
+        return defaults
+
 
     def build_preview_command(
         self, command_tokens: list[str], arg_tokens: list[str]
@@ -288,29 +279,21 @@ class CommandCatalog:
         )
 
         return {
-            "web": CommandSet(
-                "Web interface commands",
-                {
-                    "server": CommandSet(
-                        "Manage the server stuff",
-                        {
-                            "start": start_command,
-                            "stop": stop_command
-                        }
-                    )
-                }
-            ),
-            "devices": CommandSet(
-                "Device commands",
-                {
-                    "status": CommandSet(
-                        "Inspect device status",
-                        {
-                            "inspect": inspect_devices
-                        }
-                    )
-                }
-            )
+            "web": {
+                "_description": "Web interface commands",
+                "server": {
+                    "_description": "Manage the server stuff",
+                    "start": start_command,
+                    "stop": stop_command,
+                },
+            },
+            "devices": {
+                "_description": "Device commands",
+                "status": {
+                    "_description": "Inspect device status",
+                    "inspect": inspect_devices,
+                },
+            },
         }
 
 
@@ -334,14 +317,15 @@ class CommandCatalog:
             print(f"  shape: {shape}")
             print(f"  vehicle: {vehicle}")
     
-    def resolve(self, input: str):
-        tokens = input.strip().split()
-        node, args, _, _ = self._parse_tree(tokens)
-        
+    def resolve(self, user_input: str):
+        stripped = user_input.strip()
+        tokens = stripped.split() if stripped else []
+        node, remaining, _, _ = self._parse_tree(tokens)
+
         if isinstance(node, CommandEntry):
-            # assumes remaining tokens are args
-            return node, args
-        return None, args
+            converted = node.convert_args(remaining)
+            return node, converted
+        return None, remaining
     
     def find_command_entry(self, command_path: str) -> Optional[CommandEntry]:
         """Return a CommandEntry for a space-delimited command path."""
@@ -368,78 +352,108 @@ class CommandCatalog:
         return entry.dynamic_templates
 
     def preview_full_command(self, user_input: str) -> str:
+        entry, arg_tokens = self.resolve(user_input)
+
         stripped = user_input.strip()
-        if not stripped:
+        tokens = stripped.split() if stripped else []
+        _, _, matched, _ = self._parse_tree(tokens)
+
+        if not isinstance(entry, CommandEntry):
             return ""
 
-        tokens = stripped.split()
-        node, remaining, matched, _ = self._parse_tree(tokens)
+        return entry.build_preview_command(matched, arg_tokens)
 
-        if not isinstance(node, CommandEntry):
-            return ""
+    def find_options(self, user_input: str) -> list[tuple[str, str]]:
+        entry, arg_tokens = self.resolve(user_input)
+        stripped = user_input.strip()
+        tokens = stripped.split() if stripped else []
+        _, _, matched, _ = self._parse_tree(tokens)
+        trailing_space = user_input.endswith(" ")
 
-        preview = node.build_preview_command(matched, remaining)
-        return preview
-    
+        if isinstance(entry, CommandEntry):
+            return self._argument_suggestions(
+                entry=entry,
+                command_tokens=matched,
+                arg_tokens=arg_tokens,
+                trailing_space=trailing_space,
+            )
+
+        return self._command_suggestions(tokens)
+
     def find_suggestions(self, user_input: str) -> list[tuple[str, str]]:
         stripped = user_input.strip()
         tokens = stripped.split() if stripped else []
-        node, remaining, matched, current_level = self._parse_tree(tokens)
-        matches: list[tuple[str, str]] = []
-
-        # Handle partial token that failed to match a command
-        if remaining and (not isinstance(node, CommandEntry) or matched != tokens[: len(matched)]):
-            partial = remaining[0]
-            candidates = current_level if isinstance(current_level, dict) else current_level.children
-            prefix = matched
-            for name, entry in candidates.items():
-                if name.startswith(partial):
-                    full_name = " ".join(prefix + [name])
-                    desc = self._describe_entry(entry)
-                    matches.append((full_name, desc))
-                    if isinstance(entry, CommandSet):
-                        for sub_name, sub_entry in entry.children.items():
-                            child_name = f"{full_name} {sub_name}"
-                            child_desc = self._describe_entry(sub_entry)
-                            matches.append((child_name, child_desc))
-            return matches
-
-        # If we matched a CommandSet exactly, drill down
-        if isinstance(node, CommandSet):
-            prefix = matched
-            for name, entry in node.children.items():
-                full_name = " ".join(prefix + [name])
-                desc = self._describe_entry(entry)
-                matches.append((full_name, desc))
-            return matches
-
-        # No command suggestions available
-        return matches
+        return self._command_suggestions(tokens)
 
     def find_argument_suggestions(
         self, user_input: str, trailing_space: bool
     ) -> list[tuple[str, str]]:
+        entry, arg_tokens = self.resolve(user_input)
         stripped = user_input.strip()
         tokens = stripped.split() if stripped else []
-        node, remaining, matched, _ = self._parse_tree(tokens)
+        _, _, matched, _ = self._parse_tree(tokens)
 
-        if not isinstance(node, CommandEntry):
+        if not isinstance(entry, CommandEntry):
             return []
 
-        if not remaining and not trailing_space:
-            # User has not yet indicated they want arguments
+        if not arg_tokens and not trailing_space:
             return []
 
         return self._argument_suggestions(
-            entry=node,
+            entry=entry,
             command_tokens=matched,
-            arg_tokens=remaining,
+            arg_tokens=arg_tokens,
             trailing_space=trailing_space,
         )
 
     # -----------------------
     # Internal helpers
     # -----------------------
+    def _command_suggestions(
+        self,
+        tokens: list[str],
+    ) -> list[tuple[str, str]]:
+        current = self.commands
+        prefix: list[str] = []
+        matches: list[tuple[str, str]] = []
+
+        for token in tokens:
+            if isinstance(current, dict) and token in current:
+                current = current[token]
+                prefix.append(token)
+            else:
+                partial = token
+                if isinstance(current, dict):
+                    candidates = {
+                        name: entry
+                        for name, entry in current.items()
+                        if not name.startswith("_")
+                    }
+                else:
+                    return matches
+                for name, entry in candidates.items():
+                    if name.startswith(partial):
+                        full_name = " ".join(prefix + [name])
+                        matches.append((full_name, self._describe_entry(entry)))
+                        if isinstance(entry, dict):
+                            for sub_name, sub_entry in entry.items():
+                                if sub_name.startswith("_"):
+                                    continue
+                                child_full = f"{full_name} {sub_name}"
+                                matches.append((child_full, self._describe_entry(sub_entry)))
+                return matches
+
+        # All tokens matched exactly; suggest child commands/options
+        if isinstance(current, dict):
+            for name, entry in current.items():
+                if name.startswith("_"):
+                    continue
+                full_name = " ".join(prefix + [name])
+                matches.append((full_name, self._describe_entry(entry)))
+        # CommandEntry has no further suggestions
+
+        return matches
+
     def _argument_suggestions(
         self,
         entry: CommandEntry,
@@ -675,10 +689,12 @@ class CommandCatalog:
             matches.append((" ".join(suggestion_tokens), description))
         return matches
 
-    def _describe_entry(self, entry: Union[CommandSet, CommandEntry]) -> str:
+    def _describe_entry(self, entry: Union[dict, CommandEntry]) -> str:
         if isinstance(entry, CommandEntry):
             return entry.usage_summary()
-        return getattr(entry, "description", "")
+        if isinstance(entry, dict):
+            return str(entry.get("_description", ""))
+        return ""
 
     def _build_value_matches(
         self,
@@ -703,12 +719,12 @@ class CommandCatalog:
 
         Returns:
             tuple:
-                - node: The last matched CommandEntry or CommandSet, or None.
+                - node: The last matched CommandEntry or nested dict, or None.
                 - remaining_tokens: Tokens not consumed by matching.
                 - matched: List of tokens that were successfully matched.
-                - current_level: The current dictionary or children mapping.
+                - current_level: The current dictionary or mapping.
         """
-        current_level = self.commands  # Either dict or CommandSet children
+        current_level = self.commands
         node = None
         matched = []
 
@@ -716,8 +732,6 @@ class CommandCatalog:
             # Try exact match
             if isinstance(current_level, dict) and token in current_level:
                 node = current_level[token]
-            elif isinstance(current_level, CommandSet) and token in current_level.children:
-                node = current_level.children[token]
             else:
                 # No exact match
                 return node or current_level, tokens[i:], matched, current_level
@@ -725,11 +739,12 @@ class CommandCatalog:
             # Record matched token
             matched.append(token)
 
-            # Dive deeper if this node is a CommandSet
-            if isinstance(node, CommandSet):
-                current_level = node.children
+            if isinstance(node, dict):
+                current_level = node
             elif isinstance(node, CommandEntry):
                 # We've reached a leaf (command entry)
+                return node, tokens[i + 1:], matched, {}
+            else:
                 return node, tokens[i + 1:], matched, {}
 
         return node or current_level, [], matched, current_level
