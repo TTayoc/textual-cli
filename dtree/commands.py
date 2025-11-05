@@ -1,8 +1,9 @@
-import argparse 
+import argparse
 import rich_argparse
 from typing import Dict, Union, Callable, Iterable, Optional
 import inspect
 import shlex
+from rich.text import Text
 
 class BabysFirstFormatter(rich_argparse.RichHelpFormatter):
     def __init__(self, *args, **kwargs):
@@ -68,31 +69,16 @@ class CommandEntry:
         self._usage_cache = None
 
     def usage_summary(self) -> str:
-        if self._usage_cache is not None:
-            return self._usage_cache
+        return self.rich_usage().plain
 
-        default_values = self._collect_default_values()
-        variants: list[str] = []
-        seen: set[str] = set()
+    def rich_usage(self) -> Text:
+        if self.parser is None:
+            return Text(self.description)
 
-        base_variant = self._format_usage_variant(default_values, default_values)
-        if base_variant:
-            variants.append(base_variant)
-            seen.add(base_variant)
-
-        for template in self.dynamic_templates:
-            values = {key: getattr(template, key) for key in vars(template)}
-            variant = self._format_usage_variant(values, default_values)
-            if variant and variant not in seen:
-                variants.append(variant)
-                seen.add(variant)
-
-        if not variants:
-            variants = [self.name]
-
-        summary = " | ".join(variants)
-        self._usage_cache = summary
-        return summary
+        usage_markup = self.parser.format_usage().strip()
+        if not usage_markup:
+            return Text(self.description)
+        return Text.from_markup(usage_markup)
 
     @staticmethod
     def _stringify_default(value) -> str:
@@ -108,46 +94,10 @@ class CommandEntry:
         if len(value_str) > max_len:
             value_str = value_str[: max_len - 3] + "..."
 
+        value_markup = f"[magenta]{value_str}[/magenta]"
         if is_default:
-            return f"[{value_str}]"
-        return value_str
-
-    def _format_usage_variant(self, values: dict[str, object], default_values: dict[str, object]) -> str:
-        if self.parser is None:
-            return self.name
-
-        parts = [self.name]
-        for action in self.parser._actions:
-            if not action.option_strings or action.nargs == 0:
-                continue
-            dest = action.dest
-            if dest not in values:
-                continue
-            value = values[dest]
-            if value is None or value is argparse.SUPPRESS:
-                continue
-            option = next((opt for opt in action.option_strings if opt.startswith("--")), action.option_strings[0])
-            value_text = self._stringify_default(value)
-            is_default = dest in default_values and default_values[dest] == value
-            if is_default:
-                parts.append(f"[{option} {value_text}]")
-            else:
-                parts.append(f"{option} {value_text}")
-        return " ".join(parts)
-
-    def _collect_default_values(self) -> dict[str, object]:
-        defaults: dict[str, object] = {}
-        if self.parser is None:
-            return defaults
-        for action in self.parser._actions:
-            if not action.option_strings or action.nargs == 0:
-                continue
-            default = action.default
-            if default is None or default is argparse.SUPPRESS:
-                continue
-            defaults[action.dest] = default
-        return defaults
-
+            return f"[dim]{value_markup}[/dim]"
+        return value_markup
 
     def build_preview_command(
         self, command_tokens: list[str], arg_tokens: list[str]
@@ -205,6 +155,7 @@ class CommandEntry:
                 idx += 1
 
         base_line = " ".join(command_tokens) if command_tokens else self.name
+        base_line = f"[bold]{base_line}[/bold]"
         option_lines: list[str] = []
 
         for action in parser._actions:
@@ -217,7 +168,7 @@ class CommandEntry:
             option = next((opt for opt in action.option_strings if opt.startswith("--")), action.option_strings[0])
             source = sources.get(dest, "default")
             formatted_value = self._format_preview_value(value, source != "input")
-            option_lines.append(f"{option} {formatted_value}")
+            option_lines.append(f"[cyan]{option}[/cyan] {formatted_value}")
 
         if not option_lines:
             return base_line

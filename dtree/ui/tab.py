@@ -3,7 +3,7 @@ from textual.widgets import Input, ListView, ListItem, Label, Static
 from rich.text import Text
 from rich.style import Style
 
-PREVIEW_TITLE = "Preview:"
+PREVIEW_TITLE = "[bold]Preview:[/bold]"
 PREVIEW_PLACEHOLDER = f"{PREVIEW_TITLE}\n  (waiting for input)"
 
 

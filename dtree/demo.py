@@ -4,6 +4,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Input, ListView, ListItem, Static
+from rich.text import Text
 
 from commands import CommandCatalog  # uses the logic we already built
 
@@ -26,7 +27,15 @@ class DemoInput(Input):
         list_view = self.app.query_one(ListView)
         list_view.clear()
         for cmd, desc in self.matches[:8]:
-            list_view.append(ListItem(Static(f"{cmd} — {desc}")))
+            entry = self.catalog.find_command_entry(cmd)
+            if entry:
+                renderable = entry.rich_usage()
+            else:
+                renderable = Text.from_markup(cmd)
+                if desc:
+                    renderable.append("\n")
+                    renderable.append(desc, style="dim")
+            list_view.append(ListItem(Static(renderable)))
 
         event.stop()  # keep Textual from handling the event further
 
